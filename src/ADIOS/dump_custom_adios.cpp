@@ -36,26 +36,6 @@
 
 using namespace LAMMPS_NS;
 
-namespace LAMMPS_NS {
-class DumpCustomADIOSInternal {
-
- public:
-  DumpCustomADIOSInternal(){};
-  ~DumpCustomADIOSInternal() = default;
-
-  // name of adios group, referrable in adios2_config.xml
-  const std::string ioName = "custom";
-  adios2::ADIOS *ad = nullptr;    // adios object
-  adios2::IO io;                  // adios group of variables and attributes in this dump
-  adios2::Engine fh;              // adios file/stream handle object
-  // one ADIOS output variable we need to change every step
-  adios2::Variable<double> varAtoms;
-  // list of column names for the atom table
-  // (individual list of 'columns' string)
-  std::vector<std::string> columnNames;
-};
-}    // namespace LAMMPS_NS
-
 /* ---------------------------------------------------------------------- */
 
 DumpCustomADIOS::DumpCustomADIOS(LAMMPS *lmp, int narg, char **arg) : DumpCustom(lmp, narg, arg)
@@ -105,109 +85,6 @@ void DumpCustomADIOS::openfile()
       singlefile_opened = 1;
     }
   }
-}
-
-/* ---------------------------------------------------------------------- */
-
-void DumpCustomADIOS::write()
-{
-  if (domain->triclinic == 0) {
-    boxxlo = domain->boxlo[0];
-    boxxhi = domain->boxhi[0];
-    boxylo = domain->boxlo[1];
-    boxyhi = domain->boxhi[1];
-    boxzlo = domain->boxlo[2];
-    boxzhi = domain->boxhi[2];
-  } else {
-    boxxlo = domain->boxlo_bound[0];
-    boxxhi = domain->boxhi_bound[0];
-    boxylo = domain->boxlo_bound[1];
-    boxyhi = domain->boxhi_bound[1];
-    boxzlo = domain->boxlo_bound[2];
-    boxzhi = domain->boxhi_bound[2];
-    boxxy = domain->xy;
-    boxxz = domain->xz;
-    boxyz = domain->yz;
-  }
-
-  // nme = # of dump lines this proc contributes to dump
-
-  nme = count();
-
-  // ntotal = total # of atoms in snapshot
-  // atomOffset = sum of # of atoms up to this proc (exclusive prefix sum)
-
-  bigint bnme = nme;
-  MPI_Allreduce(&bnme, &ntotal, 1, MPI_LMP_BIGINT, MPI_SUM, world);
-
-  bigint atomOffset;    // sum of all atoms on processes 0..me-1
-  MPI_Scan(&bnme, &atomOffset, 1, MPI_LMP_BIGINT, MPI_SUM, world);
-  atomOffset -= nme;    // exclusive prefix sum needed
-
-  // Now we know the global size and the local subset size and offset
-  // of the atoms table
-  auto nAtomsGlobal = static_cast<size_t>(ntotal);
-  auto startRow = static_cast<size_t>(atomOffset);
-  auto nAtomsLocal = static_cast<size_t>(nme);
-  auto nColumns = static_cast<size_t>(size_one);
-  internal->varAtoms.SetShape({nAtomsGlobal, nColumns});
-  internal->varAtoms.SetSelection({{startRow, 0}, {nAtomsLocal, nColumns}});
-
-  // insure filewriter proc can receive everyone's info
-  // limit nmax*size_one to int since used as arg in MPI_Rsend() below
-  // pack my data into buf
-  // if sorting on IDs also request ID list from pack()
-  // sort buf as needed
-
-  if (nme > maxbuf) {
-    if ((bigint) nme * size_one > MAXSMALLINT) error->all(FLERR, "Too much per-proc info for dump");
-    maxbuf = nme;
-    memory->destroy(buf);
-    memory->create(buf, (maxbuf * size_one), "dump:buf");
-  }
-  if (sort_flag && sortcol == 0 && nme > maxids) {
-    maxids = nme;
-    memory->destroy(ids);
-    memory->create(ids, maxids, "dump:ids");
-  }
-
-  if (sort_flag && sortcol == 0)
-    pack(ids);
-  else
-    pack(nullptr);
-  if (sort_flag) sort();
-
-  openfile();
-  internal->fh.BeginStep();
-  // write info on data as scalars (by me==0)
-  if (me == 0) {
-    internal->fh.Put<uint64_t>("ntimestep", update->ntimestep);
-    internal->fh.Put<int>("nprocs", nprocs);
-
-    internal->fh.Put<double>("boxxlo", boxxlo);
-    internal->fh.Put<double>("boxxhi", boxxhi);
-    internal->fh.Put<double>("boxylo", boxylo);
-    internal->fh.Put<double>("boxyhi", boxyhi);
-    internal->fh.Put<double>("boxzlo", boxzlo);
-    internal->fh.Put<double>("boxzhi", boxzhi);
-
-    if (domain->triclinic) {
-      internal->fh.Put<double>("boxxy", boxxy);
-      internal->fh.Put<double>("boxxz", boxxz);
-      internal->fh.Put<double>("boxyz", boxyz);
-    }
-  }
-  // Everyone needs to write scalar variables that are used as dimensions and
-  // offsets of arrays
-  internal->fh.Put<uint64_t>("natoms", ntotal);
-  internal->fh.Put<int>("ncolumns", size_one);
-  internal->fh.Put<uint64_t>("nme", bnme);
-  internal->fh.Put<uint64_t>("offset", atomOffset);
-  // now write the atoms
-  internal->fh.Put<double>("atoms", buf);
-  internal->fh.EndStep();    // I/O will happen now...
-
-  if (multifile) { internal->fh.Close(); }
 }
 
 /* ---------------------------------------------------------------------- */
